@@ -1,2 +1,7 @@
 lab2/src/swap/swap
 lab2/src/revert_string/revert_string
+lab2/src/libs/librevert_string.a
+lab2/src/libs/librevert_string.so
+lab2/src/libs/revert_string.o
+lab2/src/libs/program_static
+lab2/src/libs/program_dynamic
