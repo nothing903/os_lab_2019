@@ -1,0 +1,10 @@
+CC=gcc
+
+parallel_sum : utils.o utils.h
+	$(CC) -o parallel_sum parallel_sum.c utils.o -pthread
+
+utils.o : utils.h
+	$(CC) -o utils.o -c utils.c
+
+clean :
+	rm -f parallel_sum
