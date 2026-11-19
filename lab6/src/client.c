@@ -1,7 +1,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>  /* <--- Вот он, добавлен сюда */
+#include <stdint.h>  
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
