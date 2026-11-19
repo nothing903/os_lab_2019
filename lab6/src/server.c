@@ -2,16 +2,20 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>  /* <--- И сюда добавлен */
 #include <string.h>
 #include <unistd.h>
-
 #include <getopt.h>
-#include <netinet/in.h>
-#include <netinet/ip.h>
-#include <sys/socket.h>
-#include <sys/types.h>
+#include <pthread.h>
 
-#include "pthread.h"
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#endif
 
 struct FactorialArgs {
   uint64_t begin;
@@ -28,72 +32,68 @@ uint64_t MultModulo(uint64_t a, uint64_t b, uint64_t mod) {
     a = (a * 2) % mod;
     b /= 2;
   }
-
   return result % mod;
 }
 
 uint64_t Factorial(const struct FactorialArgs *args) {
-  uint64_t ans = 1;
-
-  // TODO: your code here
-
+  uint64_t ans = 1 % args->mod;
+  if (args->begin > args->end) return ans;
+  for (uint64_t i = args->begin; i <= args->end; i++) {
+    ans = MultModulo(ans, i % args->mod, args->mod);
+    if (i == UINT64_MAX) break;
+  }
   return ans;
 }
 
 void *ThreadFactorial(void *args) {
   struct FactorialArgs *fargs = (struct FactorialArgs *)args;
-  return (void *)(uint64_t *)Factorial(fargs);
+  uint64_t *res = malloc(sizeof(uint64_t));
+  if (!res) return NULL;
+  *res = Factorial(fargs);
+  return (void *)res;
 }
 
 int main(int argc, char **argv) {
+#ifdef _WIN32
+  WSADATA wsaData;
+  WSAStartup(MAKEWORD(2, 2), &wsaData);
+#endif
+
   int tnum = -1;
   int port = -1;
 
   while (true) {
-    int current_optind = optind ? optind : 1;
-
     static struct option options[] = {{"port", required_argument, 0, 0},
                                       {"tnum", required_argument, 0, 0},
                                       {0, 0, 0, 0}};
-
     int option_index = 0;
     int c = getopt_long(argc, argv, "", options, &option_index);
 
-    if (c == -1)
-      break;
+    if (c == -1) break;
 
     switch (c) {
     case 0: {
       switch (option_index) {
-      case 0:
-        port = atoi(optarg);
-        // TODO: your code here
-        break;
-      case 1:
-        tnum = atoi(optarg);
-        // TODO: your code here
-        break;
-      default:
-        printf("Index %d is out of options\n", option_index);
+      case 0: port = atoi(optarg); break;
+      case 1: tnum = atoi(optarg); break;
       }
     } break;
-
-    case '?':
-      printf("Unknown argument\n");
-      break;
-    default:
-      fprintf(stderr, "getopt returned character code 0%o?\n", c);
     }
   }
 
-  if (port == -1 || tnum == -1) {
+  if (port == -1 || tnum <= 0) {
     fprintf(stderr, "Using: %s --port 20001 --tnum 4\n", argv[0]);
     return 1;
   }
 
+#ifdef _WIN32
+  SOCKET server_fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (server_fd == INVALID_SOCKET) {
+#else
   int server_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (server_fd < 0) {
-    fprintf(stderr, "Can not create server socket!");
+#endif
+    fprintf(stderr, "Can not create server socket!\n");
     return 1;
   }
 
@@ -103,94 +103,95 @@ int main(int argc, char **argv) {
   server.sin_addr.s_addr = htonl(INADDR_ANY);
 
   int opt_val = 1;
-  setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt_val, sizeof(opt_val));
+  setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt_val, sizeof(opt_val));
 
-  int err = bind(server_fd, (struct sockaddr *)&server, sizeof(server));
-  if (err < 0) {
-    fprintf(stderr, "Can not bind to socket!");
+  if (bind(server_fd, (struct sockaddr *)&server, sizeof(server)) < 0) {
+    fprintf(stderr, "Can not bind to socket!\n");
     return 1;
   }
 
-  err = listen(server_fd, 128);
-  if (err < 0) {
+  if (listen(server_fd, 128) < 0) {
     fprintf(stderr, "Could not listen on socket\n");
     return 1;
   }
 
   printf("Server listening at %d\n", port);
+  fflush(stdout);
 
   while (true) {
     struct sockaddr_in client;
     socklen_t client_len = sizeof(client);
+#ifdef _WIN32
+    SOCKET client_fd = accept(server_fd, (struct sockaddr *)&client, &client_len);
+    if (client_fd == INVALID_SOCKET) {
+#else
     int client_fd = accept(server_fd, (struct sockaddr *)&client, &client_len);
-
     if (client_fd < 0) {
-      fprintf(stderr, "Could not establish new connection\n");
+#endif
       continue;
     }
 
     while (true) {
       unsigned int buffer_size = sizeof(uint64_t) * 3;
-      char from_client[buffer_size];
-      int read = recv(client_fd, from_client, buffer_size, 0);
+      char from_client[sizeof(uint64_t) * 3];
+      size_t got = 0;
 
-      if (!read)
-        break;
-      if (read < 0) {
-        fprintf(stderr, "Client read failed\n");
-        break;
-      }
-      if (read < buffer_size) {
-        fprintf(stderr, "Client send wrong data format\n");
-        break;
+      while (got < buffer_size) {
+        int n = recv(client_fd, from_client + got, buffer_size - got, 0);
+        if (n <= 0) { got = 0; break; }
+        got += n;
       }
 
-      pthread_t threads[tnum];
+      if (got == 0) break;
 
-      uint64_t begin = 0;
-      uint64_t end = 0;
-      uint64_t mod = 0;
+      uint64_t begin = 0, end = 0, mod = 0;
       memcpy(&begin, from_client, sizeof(uint64_t));
       memcpy(&end, from_client + sizeof(uint64_t), sizeof(uint64_t));
       memcpy(&mod, from_client + 2 * sizeof(uint64_t), sizeof(uint64_t));
 
-      fprintf(stdout, "Receive: %llu %llu %llu\n", begin, end, mod);
-
+      pthread_t threads[tnum];
       struct FactorialArgs args[tnum];
-      for (uint32_t i = 0; i < tnum; i++) {
-        // TODO: parallel somehow
-        args[i].begin = 1;
-        args[i].end = 1;
-        args[i].mod = mod;
 
-        if (pthread_create(&threads[i], NULL, ThreadFactorial,
-                           (void *)&args[i])) {
-          printf("Error: pthread_create failed!\n");
-          return 1;
+      uint64_t total_range = (begin <= end) ? (end - begin + 1) : 0;
+      uint64_t chunk = (total_range + tnum - 1) / tnum;
+      if (chunk == 0) chunk = 1;
+
+      for (int i = 0; i < tnum; i++) {
+        if (total_range == 0) {
+          args[i].begin = 1; args[i].end = 0;
+        } else {
+          args[i].begin = begin + (uint64_t)i * chunk;
+          uint64_t e = begin + (uint64_t)(i + 1) * chunk - 1;
+          if (args[i].begin > end) { args[i].begin = 1; args[i].end = 0; }
+          else if (e > end) args[i].end = end;
+          else args[i].end = e;
+        }
+        args[i].mod = mod;
+        pthread_create(&threads[i], NULL, ThreadFactorial, (void *)&args[i]);
+      }
+
+      uint64_t total = 1 % mod;
+      for (int i = 0; i < tnum; i++) {
+        uint64_t *result = NULL;
+        pthread_join(threads[i], (void **)&result);
+        if (result) {
+          total = MultModulo(total, *result, mod);
+          free(result);
         }
       }
 
-      uint64_t total = 1;
-      for (uint32_t i = 0; i < tnum; i++) {
-        uint64_t result = 0;
-        pthread_join(threads[i], (void **)&result);
-        total = MultModulo(total, result, mod);
-      }
-
-      printf("Total: %llu\n", total);
-
-      char buffer[sizeof(total)];
-      memcpy(buffer, &total, sizeof(total));
-      err = send(client_fd, buffer, sizeof(total), 0);
-      if (err < 0) {
-        fprintf(stderr, "Can't send data to client\n");
-        break;
-      }
+      send(client_fd, (const char*)&total, sizeof(total), 0);
     }
 
-    shutdown(client_fd, SHUT_RDWR);
+#ifdef _WIN32
+    closesocket(client_fd);
+#else
     close(client_fd);
+#endif
   }
 
+#ifdef _WIN32
+  WSACleanup();
+#endif
   return 0;
 }
